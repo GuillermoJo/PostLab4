@@ -3,201 +3,194 @@
 #include <util/delay.h>
 #include <stdint.h>
 
-void ADC_init(void);
-uint8_t ADC_read_8bit(void);
+#define PONER_BITS(reg, mask)   ((reg) |=  (mask))
+#define LIMPIAR_BITS(reg, mask) ((reg) &= ~(mask))
+#define LEER_PIN(reg, pin)      ((reg) &   (1 << (pin)))
 
-void mostrar_contador(uint8_t contador);
+//Pines de botones
+#define BTN_SUBIR     PD2
+#define BTN_BAJAR     PD3
+#define REBOTE_MS     25
 
-void desactivar_displays(void);
-void activar_display1(void);
-void activar_display2(void);
-void enviar_segmentos(uint8_t patron);
-uint8_t hex_a_7seg(uint8_t nibble);
-void mostrar_hex_multiplexado(uint8_t valor);
+//LED de alarma
+#define LED_ALARMA    PD1
 
-void verificar_alarma(uint8_t adc, uint8_t contador);
+//Máscaras de salidas
+#define PORTD_LEDS    ((1<<PD0)|(1<<PD4)|(1<<PD5)|(1<<PD6)|(1<<PD7))
+#define PORTB_LEDS    ((1<<PB0)|(1<<PB1)|(1<<PB2))
+#define DISP1_PIN     PB3
+#define DISP2_PIN     PB4
+#define SEG_A_PIN     PB5
+#define SEGS_PORTB    ((1<<DISP1_PIN)|(1<<DISP2_PIN)|(1<<SEG_A_PIN))
+#define SEGS_PORTC    ((1<<PC0)|(1<<PC1)|(1<<PC2)|(1<<PC3)|(1<<PC4)|(1<<PC5))
 
+#define CICLOS_REFRESCO  20
+#define RETARDO_MUX_MS   2
+
+//Tabla de segmentos
+static const uint8_t TABLA_7SEG[16] = {
+    0x3F, 0x06, 0x5B, 0x4F,   /* 0-3 */
+    0x66, 0x6D, 0x7D, 0x07,   /* 4-7 */
+    0x7F, 0x6F, 0x77, 0x7C,   /* 8-B */
+    0x39, 0x5E, 0x79, 0x71    /* C-F */
+};
+
+//Prototipos
+static void    iniciar_adc(void);
+static uint8_t leer_adc(void);
+static void    salida_binaria(uint8_t valor);
+static void    escribir_segmentos(uint8_t patron);
+static void    elegir_display(uint8_t disp);
+static void    mostrar_multiplexado(uint8_t valor);
+static void    revisar_alarma(uint8_t adc, uint8_t contador);
+static void    revisar_botones(uint8_t *contador, uint8_t *muestra);
+
+//MAIN
 int main(void)
 {
-	uint8_t contador = 0;
-	uint8_t adc_valor = 0;
+    uint8_t contador = 0;
+    uint8_t muestra  = 0;
 
-	ADC_init();
+    iniciar_adc();
 
-	// D2 y D3 como entradas
-	DDRD &= ~((1 << PD2) | (1 << PD3));
+    //Entradas con pull-up para botones
+    LIMPIAR_BITS(DDRD,  (1<<BTN_SUBIR)|(1<<BTN_BAJAR));
+    PONER_BITS(PORTD,   (1<<BTN_SUBIR)|(1<<BTN_BAJAR));
 
-	// Pull-up en D2 y D3
-	PORTD |= (1 << PD2) | (1 << PD3);
+    //Salidas: LEDs contador + alarma
+    PONER_BITS(DDRD, PORTD_LEDS | (1<<LED_ALARMA));
 
-	// Salidas del contador: D0, D4, D5, D6, D7
-	DDRD |= (1 << PD0) | (1 << PD4) | (1 << PD5) | (1 << PD6) | (1 << PD7);
+    //Salidas: displays y segmentos
+    PONER_BITS(DDRB, PORTB_LEDS | SEGS_PORTB);
+    PONER_BITS(DDRC, SEGS_PORTC);
 
-	// LED alarma en D1
-	DDRD |= (1 << PD1);
+    for (;;)
+    {
+        muestra = leer_adc();
+        salida_binaria(contador);
+        revisar_alarma(muestra, contador);
 
-	// Salidas: D8, D9, D10, D11, D12, D13
-	DDRB |= (1 << PB0) | (1 << PB1) | (1 << PB2) |
-	(1 << PB3) | (1 << PB4) | (1 << PB5);
-
-	// A0..A5 como salidas
-	DDRC |= (1 << PC0) | (1 << PC1) | (1 << PC2) |
-	(1 << PC3) | (1 << PC4) | (1 << PC5);
-
-	while (1)
-	{
-		adc_valor = ADC_read_8bit();
-
-		mostrar_contador(contador);
-		verificar_alarma(adc_valor, contador);
-
-		// refresco de displays
-		for (uint8_t i = 0; i < 20; i++)
-		{
-			mostrar_hex_multiplexado(adc_valor);
-
-			// revisar botones durante el refresco
-			if (!(PIND & (1 << PD2)))
-			{
-				_delay_ms(25);
-				if (!(PIND & (1 << PD2)))
-				{
-					contador++;
-					while (!(PIND & (1 << PD2)))
-					{
-						adc_valor = ADC_read_8bit();
-						mostrar_contador(contador);
-						verificar_alarma(adc_valor, contador);
-						mostrar_hex_multiplexado(adc_valor);
-					}
-				}
-			}
-
-			if (!(PIND & (1 << PD3)))
-			{
-				_delay_ms(25);
-				if (!(PIND & (1 << PD3)))
-				{
-					contador--;
-					while (!(PIND & (1 << PD3)))
-					{
-						adc_valor = ADC_read_8bit();
-						mostrar_contador(contador);
-						verificar_alarma(adc_valor, contador);
-						mostrar_hex_multiplexado(adc_valor);
-					}
-				}
-			}
-		}
-	}
+        //Refrescar displays y revisar botones en cada ciclo
+        for (uint8_t i = 0; i < CICLOS_REFRESCO; i++)
+        {
+            mostrar_multiplexado(muestra);
+            revisar_botones(&contador, &muestra);
+        }
+    }
 }
 
-void ADC_init(void)
+//ADC
+static void iniciar_adc(void)
 {
-	// AVcc como referencia, ajuste a la izquierda, canal ADC7
-	ADMUX = (1 << REFS0) | (1 << ADLAR) | (1 << MUX2) | (1 << MUX1) | (1 << MUX0);
-
-	// Habilitar ADC, prescaler 128
-	ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
+    //AVcc como referencia, resultado alineado a la izquierda, canal ADC7
+    ADMUX  = (1<<REFS0)|(1<<ADLAR)|(1<<MUX2)|(1<<MUX1)|(1<<MUX0);
+    //Habilitar ADC, prescaler /128 ? 125 kHz @ 16 MHz
+    ADCSRA = (1<<ADEN)|(1<<ADPS2)|(1<<ADPS1)|(1<<ADPS0);
 }
 
-uint8_t ADC_read_8bit(void)
+static uint8_t leer_adc(void)
 {
-	ADCSRA |= (1 << ADSC);
-	while (ADCSRA & (1 << ADSC));
-	return ADCH;
+    PONER_BITS(ADCSRA, (1<<ADSC));
+    while (LEER_PIN(ADCSRA, ADSC));  //esperar fin de conversión
+    return ADCH;                      //ADLAR=1 ? 8 bits en ADCH
 }
 
-void mostrar_contador(uint8_t contador)
+//CONTADOR BINARIO EN LEDs
+static void salida_binaria(uint8_t valor)
 {
-	// limpiar salidas del contador en PORTD sin tocar D1, D2 y D3
-	PORTD &= ~((1 << PD0) | (1 << PD4) | (1 << PD5) | (1 << PD6) | (1 << PD7));
+    //Limpiar solo pines del contador, sin tocar alarma ni displays
+    LIMPIAR_BITS(PORTD, PORTD_LEDS);
+    LIMPIAR_BITS(PORTB, PORTB_LEDS);
 
-	// limpiar salidas del contador en PORTB sin tocar D11, D12 y D13
-	PORTB &= ~((1 << PB0) | (1 << PB1) | (1 << PB2));
+    //Bits 7-3 ? D0, D4-D7
+    if (valor & (1<<7)) PONER_BITS(PORTD, (1<<PD0));
+    if (valor & (1<<6)) PONER_BITS(PORTD, (1<<PD4));
+    if (valor & (1<<5)) PONER_BITS(PORTD, (1<<PD5));
+    if (valor & (1<<4)) PONER_BITS(PORTD, (1<<PD6));
+    if (valor & (1<<3)) PONER_BITS(PORTD, (1<<PD7));
 
-	if (contador & (1 << 7)) PORTD |= (1 << PD0); // D0
-	if (contador & (1 << 6)) PORTD |= (1 << PD4); // D4
-	if (contador & (1 << 5)) PORTD |= (1 << PD5); // D5
-	if (contador & (1 << 4)) PORTD |= (1 << PD6); // D6
-	if (contador & (1 << 3)) PORTD |= (1 << PD7); // D7
-	if (contador & (1 << 2)) PORTB |= (1 << PB0); // D8
-	if (contador & (1 << 1)) PORTB |= (1 << PB1); // D9
-	if (contador & (1 << 0)) PORTB |= (1 << PB2); // D10
+    //Bits 2-0 ? D8-D10
+    if (valor & (1<<2)) PONER_BITS(PORTB, (1<<PB0));
+    if (valor & (1<<1)) PONER_BITS(PORTB, (1<<PB1));
+    if (valor & (1<<0)) PONER_BITS(PORTB, (1<<PB2));
 }
 
-void verificar_alarma(uint8_t adc, uint8_t contador)
+//ALARMA
+static void revisar_alarma(uint8_t adc, uint8_t contador)
 {
-	if (adc > contador)
-	PORTD |= (1 << PD1);   // D1 ON
-	else
-	PORTD &= ~(1 << PD1);  // D1 OFF
+    if (adc > contador)
+        PONER_BITS(PORTD,   (1<<LED_ALARMA));
+    else
+        LIMPIAR_BITS(PORTD, (1<<LED_ALARMA));
 }
 
-void mostrar_hex_multiplexado(uint8_t valor)
+//DISPLAY 7 SEGMENTOS MULTIPLEXADO
+static void escribir_segmentos(uint8_t patron)
 {
-	uint8_t alto = (valor >> 4) & 0x0F;
-	uint8_t bajo = valor & 0x0F;
+    //Segmento a ? PB5
+    if (patron & (1<<0)) PONER_BITS(PORTB,   (1<<SEG_A_PIN));
+    else                  LIMPIAR_BITS(PORTB, (1<<SEG_A_PIN));
 
-	desactivar_displays();
-	enviar_segmentos(hex_a_7seg(alto));
-	activar_display1();
-	_delay_ms(2);
-
-	desactivar_displays();
-	enviar_segmentos(hex_a_7seg(bajo));
-	activar_display2();
-	_delay_ms(2);
+    //Segmentos b-g ? PC0-PC5 en una sola operación
+    PORTC = (PORTC & ~SEGS_PORTC) | ((patron >> 1) & 0x3F);
 }
 
-void desactivar_displays(void)
+static void elegir_display(uint8_t disp)
 {
-	PORTB &= ~((1 << PB3) | (1 << PB4));
+    LIMPIAR_BITS(PORTB, (1<<DISP1_PIN)|(1<<DISP2_PIN));
+    if (disp == 1) PONER_BITS(PORTB, (1<<DISP1_PIN));
+    else           PONER_BITS(PORTB, (1<<DISP2_PIN));
 }
 
-void activar_display1(void)
+static void mostrar_multiplexado(uint8_t valor)
 {
-	PORTB |= (1 << PB3);
-	PORTB &= ~(1 << PB4);
+    //Dígito alto
+    LIMPIAR_BITS(PORTB, (1<<DISP1_PIN)|(1<<DISP2_PIN));
+    escribir_segmentos(TABLA_7SEG[(valor >> 4) & 0x0F]);
+    elegir_display(1);
+    _delay_ms(RETARDO_MUX_MS);
+
+    //Dígito bajo
+    LIMPIAR_BITS(PORTB, (1<<DISP1_PIN)|(1<<DISP2_PIN));
+    escribir_segmentos(TABLA_7SEG[valor & 0x0F]);
+    elegir_display(2);
+    _delay_ms(RETARDO_MUX_MS);
 }
 
-void activar_display2(void)
+//BOTONES CON ANTIRREBOTE
+static void revisar_botones(uint8_t *contador, uint8_t *muestra)
 {
-	PORTB &= ~(1 << PB3);
-	PORTB |= (1 << PB4);
-}
+    //Botón subir
+    if (!LEER_PIN(PIND, BTN_SUBIR))
+    {
+        _delay_ms(REBOTE_MS);
+        if (!LEER_PIN(PIND, BTN_SUBIR))
+        {
+            (*contador)++;
+            while (!LEER_PIN(PIND, BTN_SUBIR))
+            {
+                *muestra = leer_adc();
+                salida_binaria(*contador);
+                revisar_alarma(*muestra, *contador);
+                mostrar_multiplexado(*muestra);
+            }
+        }
+    }
 
-void enviar_segmentos(uint8_t patron)
-{
-	if (patron & (1 << 0)) PORTB |= (1 << PB5); else PORTB &= ~(1 << PB5); // a
-	if (patron & (1 << 1)) PORTC |= (1 << PC0); else PORTC &= ~(1 << PC0); // b
-	if (patron & (1 << 2)) PORTC |= (1 << PC1); else PORTC &= ~(1 << PC1); // c
-	if (patron & (1 << 3)) PORTC |= (1 << PC2); else PORTC &= ~(1 << PC2); // d
-	if (patron & (1 << 4)) PORTC |= (1 << PC3); else PORTC &= ~(1 << PC3); // e
-	if (patron & (1 << 5)) PORTC |= (1 << PC4); else PORTC &= ~(1 << PC4); // f
-	if (patron & (1 << 6)) PORTC |= (1 << PC5); else PORTC &= ~(1 << PC5); // g
-}
-
-uint8_t hex_a_7seg(uint8_t nibble)
-{
-	switch (nibble)
-	{
-		case 0x0: return 0b00111111;
-		case 0x1: return 0b00000110;
-		case 0x2: return 0b01011011;
-		case 0x3: return 0b01001111;
-		case 0x4: return 0b01100110;
-		case 0x5: return 0b01101101;
-		case 0x6: return 0b01111101;
-		case 0x7: return 0b00000111;
-		case 0x8: return 0b01111111;
-		case 0x9: return 0b01101111;
-		case 0xA: return 0b01110111;
-		case 0xB: return 0b01111100;
-		case 0xC: return 0b00111001;
-		case 0xD: return 0b01011110;
-		case 0xE: return 0b01111001;
-		case 0xF: return 0b01110001;
-		default:  return 0b00000000;
-	}
+    /* Botón bajar */
+    if (!LEER_PIN(PIND, BTN_BAJAR))
+    {
+        _delay_ms(REBOTE_MS);
+        if (!LEER_PIN(PIND, BTN_BAJAR))
+        {
+            (*contador)--;
+            while (!LEER_PIN(PIND, BTN_BAJAR))
+            {
+                *muestra = leer_adc();
+                salida_binaria(*contador);
+                revisar_alarma(*muestra, *contador);
+                mostrar_multiplexado(*muestra);
+            }
+        }
+    }
 }
